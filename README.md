@@ -38,6 +38,7 @@ The server is configured via environment variables. Defaults are set for a typic
 | `DS_OCR2_IDLE_UNLOAD_SECONDS` | `900` | Seconds before unloading model (default 15 mins) |
 | `DS_OCR2_LOAD_IN_4BIT` | `0` | Set to `1` or `true` to use 4-bit quantization (saves VRAM) |
 | `DS_OCR2_PORT` | `8012` | Server port |
+| `DS_OCR2_MOCK` | `0` | Set to `1` to run in **Mock Mode** (no GPU required, returns dummy data) |
 
 ## 3) Run it
 
@@ -47,6 +48,13 @@ python deepseek_ocr2_lazy_server.py
 ```
 
 First OCR request will be the "cold load" (download/compile/load). After that it stays warm until the idle timeout is reached.
+
+### Mock Mode (CPU / Testing)
+If you don't have a GPU or want to test the server logic:
+```bash
+export DS_OCR2_MOCK=1
+python deepseek_ocr2_lazy_server.py
+```
 
 ## 4) Test (curl)
 

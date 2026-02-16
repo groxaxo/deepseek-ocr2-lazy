@@ -3,19 +3,14 @@ import time
 import uuid
 import gc
 import threading
+import argparse
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-import torch
-from transformers import AutoModel
-from huggingface_hub import snapshot_download
-from unsloth import FastVisionModel
-
-
 # -----------------------------
-# Config (Level 1 lazy loading)
+# Config
 # -----------------------------
 os.environ["UNSLOTH_WARN_UNINITIALIZED"] = "0"
 
@@ -27,24 +22,28 @@ OUTPUT_ROOT = os.path.expanduser(
     os.getenv("DS_OCR2_OUTPUT_ROOT", "/tmp/deepseek_ocr2_out")
 )
 
-# Level 1 behavior: keep process alive, unload model after idle
 IDLE_UNLOAD_SECONDS = int(
     os.getenv("DS_OCR2_IDLE_UNLOAD_SECONDS", "900")
 )  # 15 min default
 WATCHDOG_POLL_SECONDS = int(os.getenv("DS_OCR2_WATCHDOG_POLL_SECONDS", "10"))
-
-# Inference defaults (DeepSeek examples commonly use base_size=1024, image_size=768)
-DEFAULT_BASE_SIZE = int(os.getenv("DS_OCR2_BASE_SIZE", "1024"))
-DEFAULT_IMAGE_SIZE = int(os.getenv("DS_OCR2_IMAGE_SIZE", "768"))
-DEFAULT_CROP_MODE = os.getenv("DS_OCR2_CROP_MODE", "1").lower() in ("1", "true", "yes")
-
-# Optional (VRAM saving) – Unsloth supports 4bit loading flag in from_pretrained
 LOAD_IN_4BIT = os.getenv("DS_OCR2_LOAD_IN_4BIT", "0").lower() in ("1", "true", "yes")
-
-# Server
 HOST = os.getenv("DS_OCR2_HOST", "0.0.0.0")
 PORT = int(os.getenv("DS_OCR2_PORT", "8012"))
 
+# Check for Mock Mode
+MOCK_MODE = os.getenv("DS_OCR2_MOCK", "0").lower() in ("1", "true", "yes")
+
+# Imports that might fail on non-GPU/Unsloth setups
+if not MOCK_MODE:
+    import torch
+    from transformers import AutoModel
+    from huggingface_hub import snapshot_download
+    from unsloth import FastVisionModel
+else:
+    print("!!! RUNNING IN MOCK MODE (No GPU required) !!!")
+    torch = None
+    snapshot_download = None
+    FastVisionModel = None
 
 # -----------------------------
 # Global model state
@@ -60,6 +59,8 @@ _total_requests = 0
 
 
 def _snapshot_ready() -> bool:
+    if MOCK_MODE:
+        return True
     return os.path.isdir(SNAPSHOT_DIR) and any(
         os.path.exists(os.path.join(SNAPSHOT_DIR, fn))
         for fn in ("config.json", "model.safetensors", "model.safetensors.index.json")
@@ -67,37 +68,60 @@ def _snapshot_ready() -> bool:
 
 
 def _ensure_snapshot():
+    if MOCK_MODE:
+        return
     os.makedirs(SNAPSHOT_DIR, exist_ok=True)
     if not _snapshot_ready():
         snapshot_download(MODEL_ID, local_dir=SNAPSHOT_DIR)
 
 
+class MockModel:
+    def eval(self):
+        pass
+
+    def cuda(self):
+        return self
+
+    def infer(self, *args, **kwargs):
+        time.sleep(2)  # Simulate work
+        return "## Mock OCR Result\n\nThis is a simulated response because the server is running in MOCK_MODE.\n\n- Item 1: Detected\n- Item 2: Text"
+
+
 def _load_model():
     global _model, _tokenizer, _loaded_at, _last_used
 
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA not available. DeepSeek-OCR-2 infer path here expects GPU (uses .cuda())."
+    if not MOCK_MODE:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA not available. DeepSeek-OCR-2 infer path here expects GPU."
+            )
+
+        _ensure_snapshot()
+
+        print("Loading real model...")
+        model, tokenizer = FastVisionModel.from_pretrained(
+            SNAPSHOT_DIR,
+            load_in_4bit=LOAD_IN_4BIT,
+            auto_model=AutoModel,
+            trust_remote_code=True,
+            unsloth_force_compile=True,
+            use_gradient_checkpointing="unsloth",
         )
+        model.eval()
+        model = model.cuda()
+    else:
+        print("Loading MOCK model...")
+        time.sleep(1)  # Simulate load time
+        model = MockModel()
+        tokenizer = object()
 
-    _ensure_snapshot()
-
-    model, tokenizer = FastVisionModel.from_pretrained(
-        SNAPSHOT_DIR,
-        load_in_4bit=LOAD_IN_4BIT,
-        auto_model=AutoModel,
-        trust_remote_code=True,
-        unsloth_force_compile=True,
-        use_gradient_checkpointing="unsloth",
-    )
-
-    model.eval()
-    model = model.cuda()
-
-    _model = model
-    _tokenizer = tokenizer
-    _loaded_at = time.time()
-    _last_used = time.time()
+    # Update globals safely
+    with _state_lock:
+        _model = model
+        _tokenizer = tokenizer
+        _loaded_at = time.time()
+        _last_used = time.time()
+    print("Model loaded.")
 
 
 def _unload_model():
@@ -109,6 +133,7 @@ def _unload_model():
     with _state_lock:
         if _model is None:
             return
+        print("Unloading model due to idle...")
         m = _model
         t = _tokenizer
         _model = None
@@ -118,12 +143,13 @@ def _unload_model():
     # best-effort VRAM release
     del m, t
     gc.collect()
-    if torch.cuda.is_available():
+    if not MOCK_MODE and torch and torch.cuda.is_available():
         torch.cuda.empty_cache()
         try:
             torch.cuda.ipc_collect()
         except Exception:
             pass
+    print("Model unloaded.")
 
 
 def _ensure_loaded():
@@ -153,8 +179,11 @@ def _watchdog():
         with _state_lock:
             loaded = _model is not None
             last = _last_used
-        if loaded and last and (time.time() - last) >= IDLE_UNLOAD_SECONDS:
-            _unload_model()
+
+        if loaded and last:
+            idle_time = time.time() - last
+            if idle_time >= IDLE_UNLOAD_SECONDS:
+                _unload_model()
 
 
 # -----------------------------
@@ -177,15 +206,20 @@ def health():
         loaded_at = _loaded_at
         last_used = _last_used
         total = _total_requests
+
+    idle_time = 0
+    if last_used:
+        idle_time = time.time() - last_used
+
     return {
         "ok": True,
+        "mode": "mock" if MOCK_MODE else "real",
         "loaded": loaded,
+        "idle_seconds": idle_time,
         "loaded_at": loaded_at,
         "last_used": last_used,
-        "idle_unload_seconds": IDLE_UNLOAD_SECONDS,
+        "idle_unload_limit": IDLE_UNLOAD_SECONDS,
         "total_requests": total,
-        "load_in_4bit": LOAD_IN_4BIT,
-        "snapshot_dir": SNAPSHOT_DIR,
     }
 
 
@@ -198,19 +232,14 @@ def admin_unload():
 @app.post("/v1/ocr")
 async def ocr(
     file: UploadFile = File(...),
-    mode: str = Form("markdown"),  # "markdown" or "free"
+    mode: str = Form("markdown"),
     prompt: Optional[str] = Form(None),
-    base_size: int = Form(DEFAULT_BASE_SIZE),
-    image_size: int = Form(DEFAULT_IMAGE_SIZE),
-    crop_mode: bool = Form(DEFAULT_CROP_MODE),
     keep_files: bool = Form(False),
 ):
-    # Prompts per DeepSeek examples
     if prompt is None:
-        if mode.lower() == "free":
-            prompt = "<image>\nFree OCR. "
-        else:
-            prompt = "<image>\n<|grounding|>Convert the document to markdown. "
+        prompt = (
+            "<image>\nFree OCR." if mode == "free" else "<image>\nConvert to markdown."
+        )
 
     req_id = uuid.uuid4().hex
     req_dir = os.path.join(OUTPUT_ROOT, req_id)
@@ -228,71 +257,44 @@ async def ocr(
         _ensure_loaded()
         _touch_used()
 
-        # Serialize heavy GPU inference
         with _infer_lock:
             with _state_lock:
                 model = _model
                 tok = _tokenizer
-            if model is None or tok is None:
-                raise RuntimeError("Model not loaded (unexpected)")
 
-            # Use eval_mode=True so infer returns the text (see model code path)
-            text = model.infer(
-                tok,
-                prompt=prompt,
-                image_file=img_path,
-                output_path=req_dir,
-                base_size=base_size,
-                image_size=image_size,
-                crop_mode=crop_mode,
-                save_results=False,
-                test_compress=False,
-                eval_mode=True,
-            )
+            if model is None:
+                raise RuntimeError("Model failed to load")
 
-        # Save result ourselves (eval_mode returns before model's internal save_results path)
+            # In mock mode, we just call the mock method
+            if MOCK_MODE:
+                text = model.infer()
+            else:
+                # Real inference
+                text = model.infer(
+                    tok,
+                    prompt=prompt,
+                    image_file=img_path,
+                    output_path=req_dir,
+                    eval_mode=True,
+                )
+
         out_file = os.path.join(req_dir, "result.txt")
         with open(out_file, "w", encoding="utf-8") as f:
             f.write(text)
 
-        resp = {
-            "id": req_id,
-            "text": text,
-            "files": {"image": img_path, "result_txt": out_file}
-            if keep_files
-            else {"result_txt": out_file},
-            "loaded_in_4bit": LOAD_IN_4BIT,
-        }
+        resp = {"id": req_id, "text": text, "mock": MOCK_MODE}
 
-        if not keep_files:
-            # keep only result.txt by default
-            for name in os.listdir(req_dir):
-                p = os.path.join(req_dir, name)
-                if os.path.isdir(p):
-                    # remove generated folders like images/
-                    try:
-                        import shutil
-
-                        shutil.rmtree(p, ignore_errors=True)
-                    except Exception:
-                        pass
-                elif name not in ("result.txt",):
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
-
-        return JSONResponse(resp)
-
-    except Exception as e:
-        # Best-effort cleanup
         if not keep_files:
             try:
                 import shutil
 
                 shutil.rmtree(req_dir, ignore_errors=True)
-            except Exception:
+            except:
                 pass
+
+        return JSONResponse(resp)
+
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
