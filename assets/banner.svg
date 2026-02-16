@@ -1,0 +1,12 @@
+<svg width="1200" height="400" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="#0f172a"/>
+  
+  <!-- Text -->
+  <text x="50%" y="40%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold" font-size="80" fill="#ffffff">DeepSeek-OCR-2</text>
+  <text x="50%" y="60%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, sans-serif" font-size="40" fill="#38bdf8">Lazy-Loading Server &amp; MCP Tool</text>
+  <text x="50%" y="75%" dominant-baseline="middle" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" fill="#94a3b8">Save VRAM. Auto-Unload. Fast API.</text>
+  
+  <!-- Accent Line -->
+  <line x1="100" y1="350" x2="1100" y2="350" stroke="#38bdf8" stroke-width="4"/>
+</svg>

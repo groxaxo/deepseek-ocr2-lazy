@@ -1,76 +1,102 @@
-# DeepSeek-OCR-2 Lazy-Loading Server
+![DeepSeek-OCR-2 Lazy Banner](assets/banner.svg)
 
-A **Level 1 lazy-loading "instance"**: a small **FastAPI server** that **does not load DeepSeek-OCR-2 until the first request**, then **auto-unloads after an idle timeout** (freeing most VRAM), while the process stays up.
+<div align="center">
 
-This uses the **Unsloth DeepSeek-OCR-2 path** (`snapshot_download` + `FastVisionModel.from_pretrained`) from Unsloth's guide.
+# DeepSeek-OCR-2 Lazy Server
 
-## 1) Install (conda, safe against torch overrides)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![CUDA Enabled](https://img.shields.io/badge/CUDA-Enabled-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![MCP Ready](https://img.shields.io/badge/MCP-Ready-orange.svg)](https://modelcontextprotocol.io/)
+
+**The efficient way to run DeepSeek's Vision Model locally.**
+*Loads on demand. Unloads on idle. Saves your VRAM.*
+
+</div>
+
+---
+
+## ⚡ Why Use This?
+
+Running large Vision-Language Models (VLMs) like DeepSeek-OCR-2 permanently in VRAM is expensive. This **Level 1 Lazy-Loading Server**:
+
+1.  **Starts Instantly**: The process starts in milliseconds (no model load at boot).
+2.  **Loads on Demand**: The heavy 7GB+ model only loads when you actually send a request.
+3.  **Auto-Unloads**: After 15 minutes of silence (configurable), it wipes the model from GPU memory, giving your VRAM back to your OS, Games, or other AI models.
+4.  **MCP Compatible**: Plug-and-play with **Claude Desktop** and other MCP agents.
+
+## 🚀 Installation
+
+### Option A: Conda (Recommended for Local)
 
 ```bash
-# 1) Create env (Python 3.11 is fine)
-conda create -n deepseek-ocr2-unsloth python=3.11 -y
-conda activate deepseek-ocr2-unsloth
+# 1. Create Environment
+conda create -n deepseek-ocr2 python=3.11 -y
+conda activate deepseek-ocr2
 
-# 2) Install PyTorch your usual way (pick ONE):
-# If you're on CUDA 12.1:
-conda install -y pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
-# If you're on CUDA 11.8:
-# conda install -y pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+# 2. Install PyTorch (CUDA 12.1 example)
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
 
-# 3) Install Unsloth without letting pip replace torch (Unsloth recommends upgrading; this is the "no-deps" safe variant)
+# 3. Install Unsloth (Optimized Inference)
 pip install --upgrade pip
-pip install --upgrade --force-reinstall --no-deps --no-cache-dir unsloth unsloth_zoo
+pip install "unsloth[cu121-torch230] @ git+https://github.com/unslothai/unsloth.git"
 
-# 4) Server deps
-pip install fastapi uvicorn python-multipart pillow huggingface_hub mcp httpx
+# 4. Install Dependencies
+pip install -r requirements.txt
 ```
 
-Unsloth supports multiple torch/CUDA combos and provides install guidance (incl. Ampere-specific variants).
-
-## 2) Configuration
-
-The server is configured via environment variables. Defaults are set for a typical 15-minute idle unload.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DS_OCR2_MODEL_ID` | `unsloth/DeepSeek-OCR-2` | HuggingFace model ID |
-| `DS_OCR2_SNAPSHOT_DIR` | `~/models/deepseek_ocr2_unsloth` | Local cache directory for model weights |
-| `DS_OCR2_IDLE_UNLOAD_SECONDS` | `900` | Seconds before unloading model (default 15 mins) |
-| `DS_OCR2_LOAD_IN_4BIT` | `0` | Set to `1` or `true` to use 4-bit quantization (saves VRAM) |
-| `DS_OCR2_PORT` | `8012` | Server port |
-| `DS_OCR2_MOCK` | `0` | Set to `1` to run in **Mock Mode** (no GPU required, returns dummy data) |
-
-## 3) Run it
+### Option B: Docker
 
 ```bash
-conda activate deepseek-ocr2-unsloth
-python deepseek_ocr2_lazy_server.py
+# Build
+docker build -t deepseek-ocr2-lazy .
+
+# Run (passing GPU)
+docker run --gpus all -d \
+  -p 8012:8012 \
+  -v $(pwd)/models:/data/models \
+  -v $(pwd)/output:/data/output \
+  --name deepseek-ocr \
+  deepseek-ocr2-lazy
 ```
 
-First OCR request will be the "cold load" (download/compile/load). After that it stays warm until the idle timeout is reached.
+---
 
-### Mock Mode (CPU / Testing)
-If you don't have a GPU or want to test the server logic:
+## 🛠 Usage
+
+### 1. Start the Server
 ```bash
-export DS_OCR2_MOCK=1
 python deepseek_ocr2_lazy_server.py
 ```
+*Port 8012 is the default.*
 
-## 4) MCP Server (Model Context Protocol)
+### 2. OCR an Image (cURL)
+```bash
+# Extract Markdown (Standard)
+curl -X POST "http://localhost:8012/v1/ocr" \
+  -F "file=@/path/to/document.png" \
+  -F "mode=markdown"
 
-This project includes an MCP server to easily integrate DeepSeek-OCR-2 with MCP-compliant AI assistants (like Claude Desktop or other agents).
+# Raw Text Mode
+curl -X POST "http://localhost:8012/v1/ocr" \
+  -F "file=@/path/to/receipt.jpg" \
+  -F "mode=free"
+```
 
-**Prerequisite:** The lazy server (above) must be running.
+---
 
-### Configuration for Claude Desktop / Clients
-Add the following to your MCP settings configuration (e.g., `~/.config/Claude/claude_desktop_config.json`):
+## 🤖 MCP Server (Claude Desktop Integration)
+
+Use DeepSeek-OCR-2 directly inside **Claude Desktop** to read documents from your local filesystem.
+
+**Add to your `claude_desktop_config.json`:**
 
 ```json
 {
   "mcpServers": {
     "deepseek-ocr": {
-      "command": "/path/to/conda/envs/deepseek-ocr2-unsloth/bin/python",
-      "args": ["/path/to/deepseek-ocr2-lazy/deepseek_ocr2_mcp.py"],
+      "command": "/path/to/conda/envs/deepseek-ocr2/bin/python",
+      "args": ["/absolute/path/to/deepseek-ocr2-lazy/deepseek_ocr2_mcp.py"],
       "env": {
         "DS_OCR2_URL": "http://127.0.0.1:8012"
       }
@@ -79,61 +105,24 @@ Add the following to your MCP settings configuration (e.g., `~/.config/Claude/cl
 }
 ```
 
-The MCP server exposes one tool: `ocr_image(image_path, mode="markdown")`.
+**Available Tools:**
+- `ocr_image(image_path, mode="markdown")`: Reads text/tables from an image file.
 
-## 5) Test (curl)
+---
 
-**Markdown extraction (default):**
+## ⚙️ Configuration
 
-```bash
-curl -s -X POST "http://127.0.0.1:8012/v1/ocr" \
-  -F "file=@/path/to/your_image.jpg" \
-  -F "mode=markdown"
-```
+Set these Environment Variables to tune behavior:
 
-**Plain OCR:**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DS_OCR2_IDLE_UNLOAD_SECONDS` | `900` | Unload model after 15 mins of inactivity. |
+| `DS_OCR2_LOAD_IN_4BIT` | `0` | Set `1` to use 4-bit quantization (lower VRAM). |
+| `DS_OCR2_PORT` | `8012` | Server Port. |
+| `DS_OCR2_MOCK` | `0` | Set `1` to test without a GPU. |
 
-```bash
-curl -s -X POST "http://127.0.0.1:8012/v1/ocr" \
-  -F "file=@/path/to/your_image.jpg" \
-  -F "mode=free"
-```
+---
 
-## 6) Systemd (optional, keeps it running)
-
-Create: `~/.config/systemd/user/deepseek-ocr2-lazy.service`
-
-```ini
-[Unit]
-Description=DeepSeek-OCR-2 (Unsloth) Lazy Level 1
-After=network-online.target
-
-[Service]
-Type=simple
-Environment=CUDA_VISIBLE_DEVICES=0
-Environment=DS_OCR2_PORT=8012
-Environment=DS_OCR2_IDLE_UNLOAD_SECONDS=900
-Environment=DS_OCR2_SNAPSHOT_DIR=%h/models/deepseek_ocr2_unsloth
-WorkingDirectory=%h
-ExecStart=/bin/bash -lc 'conda run --no-capture-output -n deepseek-ocr2-unsloth python %h/deepseek-ocr2-lazy/deepseek_ocr2_lazy_server.py'
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-```
-
-*Note: Adjust the `ExecStart` path if your cloned folder path differs.*
-
-Enable + start:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now deepseek-ocr2-lazy.service
-journalctl --user -u deepseek-ocr2-lazy.service -f
-```
-
-## Credits
-
-- **DeepSeek-OCR-2** by DeepSeek AI
-- **Unsloth** for the optimization and inference integration
+## 📜 Credits
+- **Model**: [DeepSeek-OCR-2](https://github.com/deepseek-ai/DeepSeek-OCR-2)
+- **Inference**: [Unsloth AI](https://unsloth.ai)
