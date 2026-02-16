@@ -22,7 +22,7 @@ pip install --upgrade pip
 pip install --upgrade --force-reinstall --no-deps --no-cache-dir unsloth unsloth_zoo
 
 # 4) Server deps
-pip install fastapi uvicorn python-multipart pillow huggingface_hub
+pip install fastapi uvicorn python-multipart pillow huggingface_hub mcp httpx
 ```
 
 Unsloth supports multiple torch/CUDA combos and provides install guidance (incl. Ampere-specific variants).
@@ -56,7 +56,32 @@ export DS_OCR2_MOCK=1
 python deepseek_ocr2_lazy_server.py
 ```
 
-## 4) Test (curl)
+## 4) MCP Server (Model Context Protocol)
+
+This project includes an MCP server to easily integrate DeepSeek-OCR-2 with MCP-compliant AI assistants (like Claude Desktop or other agents).
+
+**Prerequisite:** The lazy server (above) must be running.
+
+### Configuration for Claude Desktop / Clients
+Add the following to your MCP settings configuration (e.g., `~/.config/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "deepseek-ocr": {
+      "command": "/path/to/conda/envs/deepseek-ocr2-unsloth/bin/python",
+      "args": ["/path/to/deepseek-ocr2-lazy/deepseek_ocr2_mcp.py"],
+      "env": {
+        "DS_OCR2_URL": "http://127.0.0.1:8012"
+      }
+    }
+  }
+}
+```
+
+The MCP server exposes one tool: `ocr_image(image_path, mode="markdown")`.
+
+## 5) Test (curl)
 
 **Markdown extraction (default):**
 
@@ -74,7 +99,7 @@ curl -s -X POST "http://127.0.0.1:8012/v1/ocr" \
   -F "mode=free"
 ```
 
-## 5) Systemd (optional, keeps it running)
+## 6) Systemd (optional, keeps it running)
 
 Create: `~/.config/systemd/user/deepseek-ocr2-lazy.service`
 
